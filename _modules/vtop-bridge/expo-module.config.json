@@ -1,0 +1,10 @@
+{
+    "platforms": {
+        "android": {
+            "package": "com.ghreddy.facultymate.vtopbridge",
+            "modules": [
+                "VtopBridgeModule"
+            ]
+        }
+    }
+}

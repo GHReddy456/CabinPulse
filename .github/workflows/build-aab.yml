@@ -1,0 +1,73 @@
+name: Build AAB
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Setup EAS
+        run: npm install -g eas-cli
+
+      - name: Build AAB with EAS
+        run: npx eas build --platform android --profile production --non-interactive
+        env:
+          EAS_TOKEN: ${{ secrets.EAS_TOKEN }}
+
+      - name: Get build status
+        run: |
+          BUILD_ID=$(npx eas build:list --platform android --limit 1 --json | jq -r '.[0].id')
+          echo "Build ID: $BUILD_ID"
+          echo "BUILD_ID=$BUILD_ID" >> $GITHUB_ENV
+
+      - name: Download AAB
+        run: |
+          npx eas build:download --id ${{ env.BUILD_ID }} --path ./app.aab
+        env:
+          EAS_TOKEN: ${{ secrets.EAS_TOKEN }}
+
+      - name: Upload AAB as artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: app-aab
+          path: ./app.aab
+          retention-days: 30
+
+      - name: Create Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: build-${{ github.run_number }}
+          release_name: "Build ${{ github.run_number }}"
+          body: |
+            AAB file ready for Google Play Store
+            Build ID: ${{ env.BUILD_ID }}
+          draft: false
+          prerelease: false
+
+      - name: Upload AAB to Release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./app.aab
+          asset_name: app-${{ github.run_number }}.aab
+          asset_content_type: application/octet-stream
