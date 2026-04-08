@@ -1,4 +1,4 @@
-use jni::objects::{JClass, JString};
+use jni::objects::{JClass, JObject, JString};
 use jni::sys::jstring;
 use jni::JNIEnv;
 use tokio::runtime::Runtime;
@@ -14,7 +14,7 @@ use crate::api::vtop_get_client::{
 #[no_mangle]
 pub extern "system" fn Java_com_ghreddy_facultymate_vtopbridge_VtopBridgeModule_vtopCall(
     mut env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     input: JString,
 ) -> jstring {
     let input_str: String = env.get_string(&input).expect("Couldn't get input").into();
