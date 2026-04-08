@@ -311,12 +311,17 @@ impl VtopClient {
             .get(url)
             .send()
             .await
-            .map_err(|_| VtopError::NetworkError)?;
+            .map_err(|e| VtopError::ConfigurationError(format!("VTOP open page request failed: {}", e)))?;
 
         if !response.status().is_success() || response.url().to_string().contains("login") {
             return Err(VtopError::VtopServerError);
         }
-        self.current_page = Some(response.text().await.map_err(|_| VtopError::NetworkError)?);
+        self.current_page = Some(
+            response
+                .text()
+                .await
+                .map_err(|e| VtopError::ConfigurationError(format!("VTOP open page read failed: {}", e)))?,
+        );
         let _ = self.extract_csrf_token();
         Ok(())
     }
@@ -357,11 +362,14 @@ impl VtopClient {
             .form(&params)
             .send()
             .await
-            .map_err(|_| VtopError::NetworkError)?;
+            .map_err(|e| VtopError::ConfigurationError(format!("VTOP login submit failed: {}", e)))?;
         
         let response_url = response.url().to_string();
         let status = response.status();
-        let response_text = response.text().await.map_err(|_| VtopError::NetworkError)?;
+        let response_text = response
+            .text()
+            .await
+            .map_err(|e| VtopError::ConfigurationError(format!("VTOP login response read failed: {}", e)))?;
 
         eprintln!("Response URL: {}", response_url);
         eprintln!("Response Status: {}", status);
@@ -422,11 +430,18 @@ impl VtopClient {
                 .body(body.clone())
                 .send()
                 .await
-                .map_err(|_| VtopError::NetworkError)?;
+                .map_err(|e| {
+                    VtopError::ConfigurationError(format!("VTOP prelogin setup request failed: {}", e))
+                })?;
             if !response.status().is_success() {
                 return Err(VtopError::VtopServerError);
             }
-            let text = response.text().await.map_err(|_| VtopError::NetworkError)?;
+            let text = response
+                .text()
+                .await
+                .map_err(|e| {
+                    VtopError::ConfigurationError(format!("VTOP prelogin setup response read failed: {}", e))
+                })?;
             if text.contains("base64,") {
                 eprintln!("Login page loaded. Searching for form fields...");
                 if let Some(form_idx) = text.find("<form") {
@@ -479,7 +494,8 @@ impl VtopClient {
     }
     async fn solve_captcha(&self, captcha_data: &str) -> VtopResult<String> {
         let url_safe_encoded = URL_SAFE.encode(captcha_data.as_bytes());
-        let captcha_url = format!("https://cap.va.synaptic.gg/captcha");
+        let captcha_url = std::env::var("CAP_SOLVER_URL")
+            .unwrap_or_else(|_| "https://cap.va.kryxen.dev/captcha".to_string());
 
         #[derive(Serialize)]
         struct PostData {
@@ -495,12 +511,19 @@ impl VtopClient {
             .json(&post_data)
             .send()
             .await
-            .map_err(|_| VtopError::NetworkError)?;
+            .map_err(|e| {
+                VtopError::ConfigurationError(format!("Captcha solver request failed: {}", e))
+            })?;
 
         if !response.status().is_success() {
-            return Err(VtopError::NetworkError);
+            return Err(VtopError::ConfigurationError(format!(
+                "Captcha solver unavailable (HTTP {})",
+                response.status()
+            )));
         }
-        response.text().await.map_err(|_| VtopError::NetworkError)
+        response.text().await.map_err(|e| {
+            VtopError::ConfigurationError(format!("Captcha solver response read failed: {}", e))
+        })
     }
     fn extract_csrf_token(&mut self) -> VtopResult<()> {
         let document = Html::parse_document(&self.current_page.as_ref().ok_or(
@@ -522,12 +545,15 @@ impl VtopClient {
             .get(url)
             .send()
             .await
-            .map_err(|_| VtopError::NetworkError)?;
+            .map_err(|e| VtopError::ConfigurationError(format!("VTOP initial page request failed: {}", e)))?;
 
         if !response.status().is_success() {
             return Err(VtopError::VtopServerError);
         }
-        let text = response.text().await.map_err(|_| VtopError::NetworkError)?;
+        let text = response
+            .text()
+            .await
+            .map_err(|e| VtopError::ConfigurationError(format!("VTOP initial page read failed: {}", e)))?;
         
         eprintln!("Initial page loaded. Form snippet:");
         if let Some(form_idx) = text.find("<form") {

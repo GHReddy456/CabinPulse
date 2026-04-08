@@ -4,6 +4,9 @@ import {
     Text,
     View,
     StatusBar,
+    Alert,
+    LayoutAnimation,
+    UIManager,
     TextInput,
     TouchableOpacity,
     ScrollView,
@@ -16,7 +19,7 @@ import {
     KeyboardAvoidingView,
     Keyboard,
 } from 'react-native';
-import * as Notifications from 'expo-notifications';
+import Constants from 'expo-constants';
 import { LinearGradient } from 'expo-linear-gradient';
 import {
     Search,
@@ -26,6 +29,8 @@ import {
     MapPin,
     ChevronLeft,
     ChevronRight,
+    ChevronDown,
+    ChevronUp,
     LogIn,
     Zap,
     Users as UsersIcon,
@@ -42,9 +47,11 @@ import {
     Shield,
     Eye,
     EyeOff,
+    Mail,
 } from 'lucide-react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
+import * as IntentLauncher from 'expo-intent-launcher';
 
 // Hooks and API
 import { useFirebaseData } from './src/hooks/useFirebase';
@@ -118,6 +125,14 @@ const SHADOWS = {
     },
 };
 
+const OPEN_HOUR_DAYS = [
+    { key: 'TUE', label: 'Tue' },
+    { key: 'WED', label: 'Wed' },
+    { key: 'THU', label: 'Thu' },
+    { key: 'FRI', label: 'Fri' },
+    { key: 'SAT', label: 'Sat' },
+];
+
 // ============================================
 // STATUS BADGE COMPONENT
 // ============================================
@@ -143,7 +158,7 @@ const StatusBadge = ({ status }) => {
 // ============================================
 // FACULTY CARD COMPONENT
 // ============================================
-const FacultyCard = ({ cabinId, name, data, count, isQueued, onToggleNotify }) => {
+const FacultyCard = ({ cabinId, name, data, count, isQueued, onToggleNotify, onContactFaculty, email, isContacting }) => {
     const status = data?.status || "UNKNOWN";
     const isAvailable = status === "AVAILABLE";
     const isBusy = status === "BUSY";
@@ -197,23 +212,35 @@ const FacultyCard = ({ cabinId, name, data, count, isQueued, onToggleNotify }) =
                 </View>
             </View>
 
-            {/* Action Button */}
-            {!isAvailable ? (
+            {/* Action Buttons */}
+            <View style={styles.cardActionsWrap}>
+                {!isAvailable ? (
+                    <TouchableOpacity
+                        style={[styles.cardActionBtn, isQueued && styles.cardActionBtnQueued]}
+                        onPress={() => onToggleNotify(cabinId)}
+                        activeOpacity={0.8}
+                    >
+                        <Bell size={12} color={isQueued ? COLORS.mutedForeground : "#FFF"} />
+                        <Text style={[styles.cardActionBtnText, isQueued && styles.cardActionBtnTextQueued]}>
+                            {isQueued ? "Queued" : "Notify Me"}
+                        </Text>
+                    </TouchableOpacity>
+                ) : (
+                    <View style={styles.cardAvailableTag}>
+                        <Text style={styles.cardAvailableTagText}>AVAILABLE NOW</Text>
+                    </View>
+                )}
+
                 <TouchableOpacity
-                    style={[styles.cardActionBtn, isQueued && styles.cardActionBtnQueued]}
-                    onPress={() => onToggleNotify(cabinId)}
-                    activeOpacity={0.8}
+                    style={styles.cardSecondaryActionBtn}
+                    onPress={() => onContactFaculty({ cabinId, name, email })}
+                    activeOpacity={0.85}
+                    disabled={isContacting}
                 >
-                    <Bell size={12} color={isQueued ? COLORS.mutedForeground : "#FFF"} />
-                    <Text style={[styles.cardActionBtnText, isQueued && styles.cardActionBtnTextQueued]}>
-                        {isQueued ? "Queued" : "Notify Me"}
-                    </Text>
+                    <Mail size={12} color={COLORS.foregroundMuted} />
+                    <Text style={styles.cardSecondaryActionText}>{isContacting ? 'Opening...' : 'Contact'}</Text>
                 </TouchableOpacity>
-            ) : (
-                <View style={styles.cardAvailableTag}>
-                    <Text style={styles.cardAvailableTagText}>AVAILABLE NOW</Text>
-                </View>
-            )}
+            </View>
         </View>
     );
 };
@@ -240,21 +267,33 @@ const FilterPill = ({ item, isActive, onPress }) => {
 // ============================================
 // MAIN APP COMPONENT
 // ============================================
-Notifications.setNotificationHandler({
-    handleNotification: async () => ({
-        shouldShowAlert: true,
-        shouldPlaySound: true,
-        shouldSetBadge: false,
-    }),
-});
+const isExpoGo = Constants.appOwnership === 'expo';
+
+let Notifications = null;
+if (!isExpoGo) {
+    try {
+        Notifications = require('expo-notifications');
+        Notifications.setNotificationHandler({
+            handleNotification: async () => ({
+                shouldShowAlert: true,
+                shouldPlaySound: true,
+                shouldSetBadge: false,
+            }),
+        });
+    } catch (_) {
+        Notifications = null;
+    }
+}
 
 export default function App() {
-    const { faculty, config, subsCount, loading, subscribeToFaculty, unsubscribeFromFaculty } = useFirebaseData();
+    const { faculty, config, subsCount, openHours, loading, subscribeToFaculty, unsubscribeFromFaculty } = useFirebaseData();
     const [mySubs, setMySubs] = useState([]); // Track cabinIds queued by current user
     const [currentPage, setCurrentPage] = useState('dashboard');
     const [activeTab, setActiveTab] = useState('HOME');
+    const [openHoursTab, setOpenHoursTab] = useState('ALL');
     const [statusFilter, setStatusFilter] = useState('ALL');
     const [search, setSearch] = useState('');
+    const [expandedHourCards, setExpandedHourCards] = useState({});
 
     // VTOP State
     const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -278,9 +317,17 @@ export default function App() {
     const [semesters, setSemesters] = useState([]);
     const [selectedSemester, setSelectedSemester] = useState(null);
     const [showSemesterPicker, setShowSemesterPicker] = useState(false);
+    const [contactInProgress, setContactInProgress] = useState({});
     const pandaScale = useRef(new Animated.Value(1)).current;
+    const contactDebounceRef = useRef({});
 
     const shiftY = useRef(new Animated.Value(0)).current;
+
+    useEffect(() => {
+        if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+            UIManager.setLayoutAnimationEnabledExperimental(true);
+        }
+    }, []);
 
     useEffect(() => {
         const showSubscription = Keyboard.addListener('keyboardDidShow', () => {
@@ -339,8 +386,10 @@ export default function App() {
             if (savedSubs) setMySubs(savedSubs);
 
             // Request permission
-            const { status } = await Notifications.requestPermissionsAsync();
-            if (status !== 'granted') console.log('Notification permissions not granted');
+            if (Notifications?.requestPermissionsAsync) {
+                const { status } = await Notifications.requestPermissionsAsync();
+                if (status !== 'granted') console.log('Notification permissions not granted');
+            }
         })();
     }, []);
 
@@ -353,14 +402,16 @@ export default function App() {
 
             if (lastStatus && lastStatus !== 'AVAILABLE' && currentStatus === 'AVAILABLE') {
                 // Trigger notification
-                Notifications.scheduleNotificationAsync({
-                    content: {
-                        title: "Faculty Available! 🟢",
-                        body: `${config[cabinId] || cabinId} is now available in cabin.`,
-                        data: { cabinId },
-                    },
-                    trigger: null,
-                });
+                if (Notifications?.scheduleNotificationAsync) {
+                    Notifications.scheduleNotificationAsync({
+                        content: {
+                            title: "Faculty Available! 🟢",
+                            body: `${config[cabinId] || cabinId} is now available in cabin.`,
+                            data: { cabinId },
+                        },
+                        trigger: null,
+                    });
+                }
 
                 // Auto-clear from queue as per requirement (Wait count must be set to 0 - happens in handleToggle)
                 // Actually the user said: when Dr X is available, user gets notification.
@@ -438,6 +489,108 @@ export default function App() {
         setSelectedSemester(null);
         setCurrentPage('dashboard');
         setActiveTab('HOME');
+        setOpenHoursTab('ALL');
+        setExpandedHourCards({});
+    };
+
+    const normalizeName = (value = '') => value.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+    const FACULTY_EMAIL_OVERRIDES = {
+        selvakumar: 'selvakumar.k@vitap.ac.in',
+    };
+
+    const resolveFacultyEmail = ({ name, data }) => {
+        const candidates = [
+            data?.email,
+            data?.mail,
+            data?.emailId,
+            data?.facultyEmail,
+        ].filter(Boolean);
+
+        if (candidates.length > 0) return String(candidates[0]).trim();
+
+        const n = normalizeName(name || '');
+        for (const [key, email] of Object.entries(FACULTY_EMAIL_OVERRIDES)) {
+            if (n.includes(key)) return email;
+        }
+
+        return null;
+    };
+
+    const openGmailComposer = async ({ email }) => {
+        const subjectRaw = 'Urgent: Request to Meet';
+        const bodyRaw = "Hello Sir/Ma'am,\nI would like to meet you regarding [reason].\nPlease let me know your availability.\nThank you.";
+
+        if (Platform.OS !== 'android') {
+            Alert.alert('Gmail Required', 'Gmail app is required to use this feature.');
+            return;
+        }
+
+        try {
+            const mailtoData = `mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent(subjectRaw)}&body=${encodeURIComponent(bodyRaw)}`;
+            await IntentLauncher.startActivityAsync('android.intent.action.SENDTO', {
+                data: mailtoData,
+                packageName: 'com.google.android.gm',
+                extra: {
+                    'android.intent.extra.EMAIL': [email],
+                    'android.intent.extra.SUBJECT': subjectRaw,
+                    'android.intent.extra.TEXT': bodyRaw,
+                },
+            });
+        } catch (_) {
+            Alert.alert('Gmail Required', 'Gmail app is required to use this feature.');
+        }
+    };
+
+    const handleContactFaculty = ({ cabinId, name, email }) => {
+        const now = Date.now();
+        const lastTap = contactDebounceRef.current[cabinId] || 0;
+        if (now - lastTap < 1000) return;
+        contactDebounceRef.current[cabinId] = now;
+
+        const safeEmail = email && String(email).trim().length > 0 ? String(email).trim() : null;
+        if (!safeEmail) {
+            Alert.alert('Email Unavailable', 'Faculty email not available.');
+            return;
+        }
+
+        Alert.alert(
+            'Contact Faculty',
+            'This will open Gmail to contact the faculty. Continue?',
+            [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                    text: 'Continue',
+                    onPress: async () => {
+                        if (contactInProgress[cabinId]) return;
+                        setContactInProgress((prev) => ({ ...prev, [cabinId]: true }));
+                        try {
+                            await openGmailComposer({ email: safeEmail });
+                        } finally {
+                            setTimeout(() => {
+                                setContactInProgress((prev) => ({ ...prev, [cabinId]: false }));
+                            }, 500);
+                        }
+                    },
+                },
+            ]
+        );
+    };
+
+    const resolveOpenHoursForFaculty = (item) => {
+        const byCabin = openHours[item.cabinId];
+        if (byCabin) return byCabin;
+
+        const targetName = normalizeName(item.name);
+        const entries = Object.entries(openHours || {});
+        for (const [key, schedule] of entries) {
+            const keyNormalized = normalizeName(key);
+            if (!keyNormalized) continue;
+            if (targetName.includes(keyNormalized) || keyNormalized.includes(targetName)) {
+                return schedule;
+            }
+        }
+        return null;
     };
 
     const handleToggleNotify = async (cabinId, isAutoClear = false) => {
@@ -471,6 +624,7 @@ export default function App() {
                 cabinId: id,
                 name,
                 data: faculty[id],
+                email: resolveFacultyEmail({ name, data: faculty[id] }),
                 count: subsCount[id] || 0
             }));
         } else {
@@ -478,6 +632,7 @@ export default function App() {
                 cabinId: vf.cabinId,
                 name: vf.name,
                 data: faculty[vf.cabinId],
+                email: resolveFacultyEmail({ name: vf.name, data: faculty[vf.cabinId] }),
                 count: subsCount[vf.cabinId] || 0
             }));
         }
@@ -504,6 +659,24 @@ export default function App() {
         { id: 'BUSY', label: 'Busy', icon: MinusCircle, color: COLORS.destructive },
         { id: 'UNKNOWN', label: 'Unknown', icon: HelpCircle, color: COLORS.mutedForeground }
     ];
+
+    const openHoursFaculty = useMemo(() => {
+        const sourceItems = openHoursTab === 'MY'
+            ? (isLoggedIn ? vtopFaculty.map((vf) => ({ cabinId: vf.cabinId, name: vf.name })) : [])
+            : Object.entries(config).map(([id, name]) => ({ cabinId: id, name }));
+
+        return sourceItems
+            .map((item) => ({
+                ...item,
+                schedule: resolveOpenHoursForFaculty(item),
+            }))
+            .filter((item) => (item.name + item.cabinId).toLowerCase().includes(search.toLowerCase()));
+    }, [openHoursTab, isLoggedIn, vtopFaculty, config, openHours, search]);
+
+    const toggleHoursCard = (cabinId) => {
+        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+        setExpandedHourCards((prev) => ({ ...prev, [cabinId]: !prev[cabinId] }));
+    };
 
     // ============================================
     // DASHBOARD RENDER
@@ -590,6 +763,8 @@ export default function App() {
                                             {...f}
                                             isQueued={mySubs.includes(f.cabinId)}
                                             onToggleNotify={handleToggleNotify}
+                                            onContactFaculty={handleContactFaculty}
+                                            isContacting={!!contactInProgress[f.cabinId]}
                                         />
                                     ))}
                                 </View>
@@ -718,6 +893,165 @@ export default function App() {
         </View>
     );
 
+    const normalizeHoursValue = (value, slot) => {
+        if (!value || String(value).trim().length === 0) return 'N/A';
+        const raw = String(value).trim();
+        if (/^n\/a$/i.test(raw)) return 'N/A';
+        if (/(AM|PM)/i.test(raw)) return raw.toUpperCase();
+
+        const hourRange = raw.match(/^(\d{1,2})(?::\d{2})?\s*-\s*(\d{1,2})(?::\d{2})?$/);
+        if (hourRange) {
+            const start = hourRange[1];
+            const end = hourRange[2];
+            return `${start}-${end} ${slot === 'am' ? 'AM' : 'PM'}`;
+        }
+
+        return raw.toUpperCase();
+    };
+
+    const renderHoursValue = (schedule, dayKey, slot) => {
+        const value = schedule?.[dayKey]?.[slot];
+        return normalizeHoursValue(value, slot);
+    };
+
+    const getTodayOpenHoursDay = () => {
+        const nowDay = new Date().getDay();
+        const dayMap = {
+            0: { key: 'SUN', label: 'Sun' },
+            1: { key: 'MON', label: 'Mon' },
+            2: { key: 'TUE', label: 'Tue' },
+            3: { key: 'WED', label: 'Wed' },
+            4: { key: 'THU', label: 'Thu' },
+            5: { key: 'FRI', label: 'Fri' },
+            6: { key: 'SAT', label: 'Sat' },
+        };
+        return dayMap[nowDay] || { key: 'WED', label: 'Wed' };
+    };
+
+    const todayOpenHoursDay = getTodayOpenHoursDay();
+
+    const renderOpenHours = () => (
+        <View style={styles.dashboard}>
+            <StatusBar barStyle="dark-content" backgroundColor={COLORS.card} />
+
+            <View style={styles.header}>
+                <View style={styles.headerTop}>
+                    <View>
+                        <Text style={styles.headerLogo}>Open <Text style={styles.headerLogoSub}>Hours</Text></Text>
+                        <View style={styles.headerLive}>
+                            <View style={styles.liveDot} />
+                            <Text style={styles.liveText}>TUESDAY TO SATURDAY</Text>
+                        </View>
+                    </View>
+
+                    <View style={styles.tabToggle}>
+                        <TouchableOpacity
+                            style={[styles.tabBtn, openHoursTab === 'ALL' && styles.tabBtnActive]}
+                            onPress={() => { setOpenHoursTab('ALL'); Haptics.selectionAsync(); }}
+                        >
+                            <Text style={[styles.tabBtnText, openHoursTab === 'ALL' && styles.tabBtnTextActive]}>ALL</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                            style={[styles.tabBtn, openHoursTab === 'MY' && styles.tabBtnActive]}
+                            onPress={() => {
+                                Haptics.selectionAsync();
+                                if (!isLoggedIn) setShowLogin(true);
+                                else setOpenHoursTab('MY');
+                            }}
+                        >
+                            <Text style={[styles.tabBtnText, openHoursTab === 'MY' && styles.tabBtnTextActive]}>MY FACULTY</Text>
+                        </TouchableOpacity>
+                    </View>
+                </View>
+
+                <View style={styles.searchContainer}>
+                    <View style={styles.searchBar}>
+                        <Search size={16} color={COLORS.mutedForeground} />
+                        <TextInput
+                            placeholder="Search all faculty..."
+                            placeholderTextColor={COLORS.mutedForeground}
+                            style={styles.searchInput}
+                            value={search}
+                            onChangeText={setSearch}
+                        />
+                    </View>
+                </View>
+            </View>
+
+            <ScrollView contentContainerStyle={styles.openHoursScroll} showsVerticalScrollIndicator={false}>
+                {openHoursFaculty.length === 0 ? (
+                    <View style={styles.empty}>
+                        <Clock size={32} color={COLORS.border} />
+                        <Text style={styles.emptyText}>{openHoursTab === 'MY' ? 'LOGIN TO VIEW MY FACULTY HOURS' : 'NO FACULTY FOUND'}</Text>
+                    </View>
+                ) : (
+                    openHoursFaculty.map((item) => {
+                        const todayAm = renderHoursValue(item.schedule, todayOpenHoursDay.key, 'am');
+                        const todayPm = renderHoursValue(item.schedule, todayOpenHoursDay.key, 'pm');
+                        return (
+                            <TouchableOpacity
+                                key={item.cabinId}
+                                style={styles.openHoursCard}
+                                activeOpacity={0.96}
+                                onPress={() => toggleHoursCard(item.cabinId)}
+                            >
+                                <View style={styles.openHoursHeaderRow}>
+                                    <View style={styles.openHoursHeaderLeft}>
+                                        <View style={styles.openHoursAvatar}>
+                                            <UserIcon size={18} color={'#475569'} />
+                                        </View>
+                                        <View style={{ flex: 1 }}>
+                                            <Text style={styles.openHoursName} numberOfLines={1}>{item.name}</Text>
+                                            <Text style={styles.openHoursCabin}>{item.cabinId}</Text>
+                                        </View>
+                                    </View>
+                                </View>
+
+                                <View style={styles.openHoursHero}>
+                                    <View style={styles.openHoursHeroHead}>
+                                        <View style={styles.openHoursHeroLabelRow}>
+                                            <View style={styles.openHoursHeroDot} />
+                                            <Text style={styles.openHoursHeroLabel}>OPEN HOURS</Text>
+                                        </View>
+                                    </View>
+                                    <Text style={styles.openHoursHeroValue}>
+                                        {todayOpenHoursDay.label}, {todayAm}, {todayPm}
+                                    </Text>
+                                </View>
+
+                                <View style={styles.openHoursToggleIconWrap}>
+                                    {expandedHourCards[item.cabinId] ? (
+                                        <ChevronUp size={18} color="#94A3B8" />
+                                    ) : (
+                                        <ChevronDown size={18} color="#94A3B8" />
+                                    )}
+                                </View>
+
+                                {expandedHourCards[item.cabinId] && (
+                                    <View style={styles.openHoursTableWrap}>
+                                        <View style={styles.openHoursTable}>
+                                            {OPEN_HOUR_DAYS.map((day) => {
+                                                const isToday = day.key === todayOpenHoursDay.key;
+                                                return (
+                                                    <View key={day.key} style={[styles.openHoursDayRow, isToday && styles.openHoursDayRowToday]}>
+                                                        <Text style={[styles.openHoursDayLabel, isToday && styles.openHoursDayLabelToday]}>{day.label}</Text>
+                                                        <Text style={[styles.openHoursInlineValue, isToday && styles.openHoursInlineValueToday]}>{renderHoursValue(item.schedule, day.key, 'am')}</Text>
+                                                        <Text style={[styles.openHoursInlineValue, isToday && styles.openHoursInlineValueToday]}>{renderHoursValue(item.schedule, day.key, 'pm')}</Text>
+                                                    </View>
+                                                );
+                                            })}
+                                        </View>
+                                    </View>
+                                )}
+                            </TouchableOpacity>
+                        );
+                    })
+                )}
+                <View style={{ height: 120 }} />
+            </ScrollView>
+        </View>
+    );
+
     // ============================================
     // MAIN RENDER
     // ============================================
@@ -725,7 +1059,7 @@ export default function App() {
         <SafeAreaProvider>
             <View style={styles.container}>
                 <SafeAreaView style={{ flex: 1 }} edges={['top', 'left', 'right']}>
-                    {currentPage === 'dashboard' ? renderDashboard() : renderProfile()}
+                    {currentPage === 'dashboard' ? renderDashboard() : currentPage === 'open-hours' ? renderOpenHours() : renderProfile()}
 
                     {/* Bottom Navigation */}
                     <View style={styles.bottomNavWrapper}>
@@ -736,6 +1070,14 @@ export default function App() {
                             >
                                 <LayoutGrid size={18} color={currentPage === 'dashboard' ? "#FFF" : COLORS.mutedForeground} />
                                 <Text style={[styles.navText, currentPage === 'dashboard' && styles.navTextActive]}>HOME</Text>
+                            </TouchableOpacity>
+                            <View style={styles.navDivider} />
+                            <TouchableOpacity
+                                style={styles.navItem}
+                                onPress={() => { setCurrentPage('open-hours'); Haptics.selectionAsync(); }}
+                            >
+                                <Clock size={18} color={currentPage === 'open-hours' ? "#FFF" : COLORS.mutedForeground} />
+                                <Text style={[styles.navText, currentPage === 'open-hours' && styles.navTextActive]}>OPEN HOURS</Text>
                             </TouchableOpacity>
                             <View style={styles.navDivider} />
                             <TouchableOpacity
@@ -1050,12 +1392,12 @@ const styles = StyleSheet.create({
     // Card
     card: {
         width: (width - 50) / 2,
-        aspectRatio: 1,
+        aspectRatio: 0.84,
         borderRadius: 18,
-        padding: 10,
+        padding: 8,
         borderWidth: 1,
-        marginBottom: 8,
-        justifyContent: 'space-between',
+        marginBottom: 7,
+        justifyContent: 'flex-start',
         ...SHADOWS.sm,
     },
     cardHeader: {
@@ -1088,14 +1430,14 @@ const styles = StyleSheet.create({
 
     // Card Body
     cardBody: {
-        marginTop: 6,
+        marginTop: 3,
     },
     cardName: {
-        fontSize: 13,
+        fontSize: 12,
         fontWeight: '800',
         color: COLORS.foreground,
-        lineHeight: 16,
-        minHeight: 32,
+        lineHeight: 15,
+        minHeight: 30,
     },
     cardLocation: {
         flexDirection: 'row',
@@ -1112,14 +1454,15 @@ const styles = StyleSheet.create({
     // Card Stats
     cardStats: {
         flexDirection: 'row',
-        gap: 6,
-        marginTop: 6,
+        gap: 5,
+        marginTop: 3,
     },
     statItem: {
         flex: 1,
         backgroundColor: 'rgba(255,255,255,0.5)',
         borderRadius: 8,
-        padding: 4,
+        paddingVertical: 3,
+        paddingHorizontal: 4,
         borderWidth: 1,
         borderColor: 'rgba(0,0,0,0.03)',
     },
@@ -1136,20 +1479,23 @@ const styles = StyleSheet.create({
         letterSpacing: 0.5,
     },
     statValue: {
-        fontSize: 11,
+        fontSize: 10,
         fontWeight: '900',
         color: COLORS.foreground,
     },
 
     // Card Action
+    cardActionsWrap: {
+        marginTop: 'auto',
+    },
     cardActionBtn: {
         backgroundColor: COLORS.primary,
-        height: 32,
+        height: 29,
         borderRadius: 10,
         flexDirection: 'row',
         alignItems: 'center',
         justifyContent: 'center',
-        marginTop: 4,
+        marginTop: 3,
     },
     cardActionBtnText: {
         color: '#FFF',
@@ -1180,6 +1526,24 @@ const styles = StyleSheet.create({
         color: COLORS.success,
         fontSize: 10,
         fontWeight: '800',
+    },
+    cardSecondaryActionBtn: {
+        height: 26,
+        borderRadius: 10,
+        borderWidth: 1,
+        borderColor: 'rgba(100,116,139,0.35)',
+        backgroundColor: 'rgba(255,255,255,0.68)',
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        marginTop: 4,
+    },
+    cardSecondaryActionText: {
+        color: '#000000',
+        fontSize: 10,
+        fontWeight: '800',
+        marginLeft: 5,
+        letterSpacing: 0.2,
     },
 
     // Empty State
@@ -1233,7 +1597,7 @@ const styles = StyleSheet.create({
     },
     bottomNav: {
         flexDirection: 'row',
-        width: 220,
+        width: 320,
         height: 54,
         backgroundColor: '#000000',
         borderRadius: 16,
@@ -1251,13 +1615,159 @@ const styles = StyleSheet.create({
         backgroundColor: 'rgba(255,255,255,0.15)',
     },
     navText: {
-        fontSize: 8,
+        fontSize: 7,
         fontWeight: '900',
         color: COLORS.mutedForeground,
         marginTop: 4,
+        letterSpacing: 0.3,
     },
     navTextActive: {
         color: '#FFF',
+    },
+
+    // Open Hours
+    openHoursScroll: {
+        paddingHorizontal: 16,
+        paddingTop: 8,
+        paddingBottom: 96,
+    },
+    openHoursCard: {
+        width: '100%',
+        minHeight: 96,
+        borderRadius: 18,
+        borderWidth: 1,
+        borderColor: '#A9D9FB',
+        marginBottom: 12,
+        padding: 12,
+        backgroundColor: '#CFEAFF',
+        shadowColor: '#77BFF2',
+        shadowOffset: { width: 0, height: 6 },
+        shadowOpacity: 0.14,
+        shadowRadius: 12,
+        elevation: 3,
+    },
+    openHoursHeaderRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        minHeight: 42,
+    },
+    openHoursHeaderLeft: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        flex: 1,
+        marginRight: 10,
+    },
+    openHoursAvatar: {
+        width: 46,
+        height: 46,
+        borderRadius: 12,
+        borderWidth: 1,
+        borderColor: '#B8DEFB',
+        justifyContent: 'center',
+        alignItems: 'center',
+        backgroundColor: 'rgba(255,255,255,0.88)',
+        marginRight: 10,
+    },
+    openHoursName: {
+        fontSize: 18,
+        fontWeight: '900',
+        color: '#000000',
+    },
+    openHoursCabin: {
+        marginTop: 2,
+        fontSize: 10,
+        fontWeight: '700',
+        color: '#111111',
+    },
+    openHoursHero: {
+        marginTop: 10,
+        backgroundColor: '#FFFFFF',
+        borderRadius: 12,
+        borderWidth: 1,
+        borderColor: '#DDE6F2',
+        padding: 10,
+    },
+    openHoursHeroHead: {
+        flexDirection: 'row',
+        justifyContent: 'flex-start',
+        alignItems: 'center',
+        marginBottom: 4,
+    },
+    openHoursHeroLabelRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 7,
+    },
+    openHoursHeroDot: {
+        width: 9,
+        height: 9,
+        borderRadius: 4.5,
+        backgroundColor: '#16A34A',
+    },
+    openHoursHeroLabel: {
+        fontSize: 10,
+        fontWeight: '900',
+        color: '#000000',
+        letterSpacing: 0.2,
+    },
+    openHoursHeroValue: {
+        fontSize: 12,
+        fontWeight: '700',
+        color: '#000000',
+    },
+    openHoursToggleIconWrap: {
+        marginTop: 10,
+        alignItems: 'center',
+        justifyContent: 'center',
+        alignSelf: 'center',
+    },
+    openHoursTableWrap: {
+        marginTop: 12,
+        borderRadius: 12,
+        borderWidth: 1,
+        borderColor: '#DDE6F2',
+        backgroundColor: '#FFFFFF',
+        padding: 4,
+    },
+    openHoursTable: {
+        borderRadius: 10,
+        overflow: 'hidden',
+        backgroundColor: '#FFFFFF',
+    },
+    openHoursDayRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        borderRadius: 10,
+        paddingHorizontal: 8,
+        paddingVertical: 8,
+        borderBottomWidth: 1,
+        borderBottomColor: 'rgba(15,23,42,0.08)',
+    },
+    openHoursDayRowToday: {
+        backgroundColor: 'rgba(169, 217, 251, 0.35)',
+    },
+    openHoursDayLabel: {
+        width: 44,
+        fontSize: 11,
+        color: '#000000',
+        fontWeight: '700',
+        letterSpacing: 0.2,
+    },
+    openHoursDayLabelToday: {
+        color: '#000000',
+        fontWeight: '900',
+    },
+    openHoursInlineValue: {
+        flex: 1,
+        fontSize: 11,
+        color: '#000000',
+        fontWeight: '700',
+        textAlign: 'center',
+    },
+    openHoursInlineValueToday: {
+        color: '#000000',
+        fontWeight: '900',
     },
 
     // Profile Page
@@ -1427,7 +1937,7 @@ const styles = StyleSheet.create({
     pandaWrapper: {
         width: '100%',
         alignItems: 'center',
-        paddingTop: em(3.1),
+        paddingTop: 50,
         position: 'relative',
     },
     loginCard: {

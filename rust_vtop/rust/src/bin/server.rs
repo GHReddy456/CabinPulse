@@ -13,6 +13,7 @@ use rust_lib_vitapmate::api::vtop_get_client::{
     fetch_semesters,
     fetch_timetable,
 };
+use rust_lib_vitapmate::api::vtop::vtop_errors::VtopError;
 
 #[derive(Deserialize)]
 struct LoginRequest {
@@ -46,6 +47,22 @@ struct Semester {
 struct ErrorResponse {
     error: String,
     details: Option<String>,
+}
+
+fn map_login_error(error: &VtopError) -> (StatusCode, String) {
+    match error {
+        VtopError::InvalidCredentials | VtopError::AuthenticationFailed(_) => {
+            (StatusCode::UNAUTHORIZED, error.to_string())
+        }
+        VtopError::CaptchaRequired => (
+            StatusCode::UNAUTHORIZED,
+            "Captcha verification required on VTOP. Complete login once in browser and retry.".to_string(),
+        ),
+        VtopError::NetworkError | VtopError::VtopServerError | VtopError::ConfigurationError(_) => {
+            (StatusCode::BAD_GATEWAY, error.to_string())
+        }
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
 }
 
 #[tokio::main]
@@ -89,11 +106,12 @@ async fn handle_login(
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
             Err(e) => {
+                let (status, details) = map_login_error(&e);
                 return Err((
-                    StatusCode::UNAUTHORIZED,
+                    status,
                     Json(ErrorResponse {
                         error: "Login failed".to_string(),
-                        details: Some(format!("{:?}", e)),
+                        details: Some(details),
                     }),
                 ));
             }
